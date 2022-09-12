@@ -33,8 +33,18 @@ def main():
     model.load_state_dict(
         dist_util.load_state_dict(args.model_path, map_location="cpu")
     )
-    model.to(dist_util.dev())
+
+    device = dist_util.dev() if args.device == -2 else th.device(f"cuda:{args.device}")
+
+    model.to(device)
     model.eval()
+
+    print(model)
+
+    def count_parameters(m):
+        return sum(p.numel() for p in m.parameters() if p.requires_grad)
+
+    print(f"# Params: {count_parameters(model)}")
 
     logger.log("sampling...")
     all_images = []
@@ -43,7 +53,7 @@ def main():
         model_kwargs = {}
         if args.class_cond:
             classes = th.randint(
-                low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev()
+                low=0, high=NUM_CLASSES, size=(args.batch_size,), device=device
             )
             model_kwargs["y"] = classes
         sample_fn = (
@@ -95,6 +105,7 @@ def create_argparser():
         batch_size=16,
         use_ddim=False,
         model_path="",
+        device="-1",
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
