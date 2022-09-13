@@ -9,7 +9,7 @@ import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
 
-from . import dist_util, logger
+from . import logger
 
 from .fp16_util import (
     make_master_params,
@@ -95,7 +95,7 @@ class TrainLoop:
                 copy.deepcopy(self.master_params) for _ in range(len(self.ema_rate))
             ]
 
-        if th.cuda.is_available() and False:
+        if th.cuda.is_available():
             self.use_ddp = True
             self.ddp_model = DDP(
                 self.model,

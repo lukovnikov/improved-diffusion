@@ -10,6 +10,8 @@ import numpy as np
 import torch as th
 import torch.distributed as dist
 
+from PIL import Image
+
 from improved_diffusion import dist_util, logger
 from improved_diffusion.script_util import (
     NUM_CLASSES,
@@ -34,6 +36,8 @@ def main():
         dist_util.load_state_dict(args.model_path, map_location="cpu")
     )
 
+    os.makedirs(args.save_path, exist_ok=True)
+
     device = dist_util.dev() if args.device == -2 else th.device(f"cuda:{args.device}")
 
     model.to(device)
@@ -47,9 +51,11 @@ def main():
     print(f"# Params: {count_parameters(model)}")
 
     logger.log("sampling...")
-    all_images = []
-    all_labels = []
-    while len(all_images) * args.batch_size < args.num_samples:
+    # all_images = []
+    # all_labels = []
+    number_generated = 0
+    batsize = args.batch_size
+    while number_generated < args.num_samples:
         model_kwargs = {}
         if args.class_cond:
             classes = th.randint(
@@ -71,15 +77,26 @@ def main():
 
         gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
-        all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
+        images = [sample.cpu().numpy() for sample in gathered_samples]
+        cnt = 0
+        for imagebatch in images:
+            for i in range(len(imagebatch)):
+                img = Image.fromarray(imagebatch[i])
+                img.save(f"{args.save_path}/{cnt+number_generated}.tiff")
+                cnt += 1
+        # all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
         if args.class_cond:
+            assert False
             gathered_labels = [
                 th.zeros_like(classes) for _ in range(dist.get_world_size())
             ]
             dist.all_gather(gathered_labels, classes)
             all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
-        logger.log(f"created {len(all_images) * args.batch_size} samples")
 
+        number_generated += cnt
+        logger.log(f"created {number_generated} samples")
+
+    """
     arr = np.concatenate(all_images, axis=0)
     arr = arr[: args.num_samples]
     if args.class_cond:
@@ -93,6 +110,7 @@ def main():
             np.savez(out_path, arr, label_arr)
         else:
             np.savez(out_path, arr)
+    """
 
     dist.barrier()
     logger.log("sampling complete")
@@ -101,10 +119,11 @@ def main():
 def create_argparser():
     defaults = dict(
         clip_denoised=True,
-        num_samples=10000,
+        num_samples=50000,
         batch_size=16,
         use_ddim=False,
         model_path="",
+        save_path="",
         device="-1",
     )
     defaults.update(model_and_diffusion_defaults())

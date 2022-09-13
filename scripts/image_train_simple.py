@@ -6,7 +6,7 @@ import argparse
 
 import torch
 
-from improved_diffusion import dist_util, logger
+from improved_diffusion import logger
 from improved_diffusion.image_datasets import load_data
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
@@ -19,6 +19,7 @@ from improved_diffusion.train_util import TrainLoop
 
 
 def create_argparser():
+    # training arguments
     defaults = dict(
         data_dir="",
         schedule_sampler="uniform",
@@ -44,10 +45,9 @@ def create_argparser():
 def main():
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist()
     logger.configure()
 
-    device = (torch.device(f"cuda:{args.gpu}") if args.gpu > -1 else torch.device("cpu")) if args.gpu > -2 else dist_util.dev()
+    device = torch.device(f"cuda:{args.gpu}") if args.gpu > -1 else torch.device("cpu")
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -81,7 +81,6 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
-        device=device,
     ).run_loop()
 
 
