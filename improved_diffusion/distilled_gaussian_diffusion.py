@@ -42,7 +42,7 @@ class DistilledGaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
-        jumpsched=2,Z        # if integer, specifies jump size divisor for all phases, if list specifies jump sizes
+        jumpsched=2,        # if integer, specifies jump size divisor for all phases, if list specifies jump sizes
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
@@ -59,7 +59,6 @@ class DistilledGaussianDiffusion:
 
         self.jumpsched = jumpsched if not isinstance(jumpsched, int) \
             else [jumpsched**k for k in range(0, int(math.ceil(math.log(self.num_timesteps)/math.log(jumpsched)))+1)]
-        # jump size
         self.distillphase = [0]
         self.teacher = None
 
@@ -420,11 +419,12 @@ class DistilledGaussianDiffusion:
         self,
         model,
         x,
-        t,
+        t,          # should be the starting time step of the jump
         clip_denoised=True,
         denoised_fn=None,
         model_kwargs=None,
         eta=0.0,
+        jumpsize=1,
     ):
         """
         Sample x_{t-1} from the model using DDIM.
@@ -442,8 +442,13 @@ class DistilledGaussianDiffusion:
         # Usually our model outputs epsilon, but we re-derive it
         # in case we used x_start or x_prev prediction.
         eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+
+        newt = t - jumpsize + 1     # if t == 999, oldt remains 999,
+                                    # if t == 999 and jump size is 100, newt becomes 900
+                                    # if t == 99 and jump size is 100, newt becomes 0
+
         alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
-        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
+        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, newt, x.shape)
         sigma = (
             eta
             * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
@@ -456,7 +461,7 @@ class DistilledGaussianDiffusion:
             + th.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
         )
         nonzero_mask = (
-            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+            (newt != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         )  # no noise when t == 0
         sample = mean_pred + nonzero_mask * sigma * noise
         return {"sample": sample, "pred_xstart": out["pred_xstart"]}
@@ -614,7 +619,7 @@ class DistilledGaussianDiffusion:
         output = th.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, clip_denoised=True):
         """
         Compute training losses for a single timestep.
 
@@ -631,11 +636,38 @@ class DistilledGaussianDiffusion:
             model_kwargs = {}
         if noise is None:
             noise = th.randn_like(x_start)
-        x_t = self.q_sample(x_start, t, noise=noise)
+
+        # round off t up to the nearest valid jump start given current jump size
+        current_jump_size = self.jumpsched[self.distillphase[0]]
+        jump_start_t = t + current_jump_size - t % current_jump_size - 1   # 969 and jump 100 --> 999
+
+        x_t = self.q_sample(x_start, jump_start_t, noise=noise)
+
+        # compute target eps* (and later x0) and update terms
+
+        # perform a number of DDIM steps of teacher model, starting from t  and ending in t-jumpsize
+        prev_jump_size = self.get_prev_jump_size()
+        with torch.no_grad():
+            _t = jump_start_t
+            x_tmX = x_t
+
+            while torch.any(_t > (jump_start_t - current_jump_size)):
+                x_tmX, x_start = self.ddim_sample(self.teacher, x_tmX, _t,
+                                                    clip_denoised=clip_denoised, jumpsize=prev_jump_size)
+                _t = _t - prev_jump_size
+
+            # compute new target
+            if self.model_mean_type == ModelMeanType.EPSILON:
+                pass   # TODO
+                sqrt_recip_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recip_alphas_cumprod, jump_start_t, x_t.shape)
+                sqrt_recipm1_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, jump_start_t, x_t.shape)
+                alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, _t+1, x_t.shape)
+                eps_star = (x_tmX - )
+            else:
+                raise Exception("model mean types other than epsilon not supported yet")
 
         terms = {}
-
-        if self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:
+        """if self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:
             terms["loss"] = self._vb_terms_bpd(
                 model=model,
                 x_start=x_start,
@@ -646,6 +678,7 @@ class DistilledGaussianDiffusion:
             )["output"]
             if self.loss_type == LossType.RESCALED_KL:
                 terms["loss"] *= self.num_timesteps
+
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
             model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
 
@@ -677,15 +710,26 @@ class DistilledGaussianDiffusion:
                 )[0],
                 ModelMeanType.START_X: x_start,
                 ModelMeanType.EPSILON: noise,
-            }[self.model_mean_type]
-            assert model_output.shape == target.shape == x_start.shape
-            terms["mse"] = mean_flat((target - model_output) ** 2)
-            if "vb" in terms:
-                terms["loss"] = terms["mse"] + terms["vb"]
-            else:
-                terms["loss"] = terms["mse"]
+            }[self.model_mean_type]"""
+
+        model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
+
+        # if learned variance, disregard the variance output channels when computing loss wrt mean
+        if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE, ]:
+            B, C = x_t.shape[:2]
+            assert model_output.shape == (B, C * 2, *x_t.shape[2:])
+            model_output, model_var_values = th.split(model_output, C, dim=1)
+
+        assert model_output.shape == target.shape == x_start.shape
+        terms["mse"] = mean_flat((target - model_output) ** 2)
+
+        if "vb" in terms:
+            terms["loss"] = terms["mse"] + terms["vb"]
         else:
-            raise NotImplementedError(self.loss_type)
+            terms["loss"] = terms["mse"]
+
+        """else:
+            raise NotImplementedError(self.loss_type)"""
 
         return terms
 

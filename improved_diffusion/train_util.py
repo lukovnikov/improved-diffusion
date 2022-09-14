@@ -4,6 +4,7 @@ import os
 
 import blobfile as bf
 import numpy as np
+import torch
 import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
@@ -47,8 +48,10 @@ class TrainLoop:
         weight_decay=0.0,
         lr_anneal_steps=0,
             device=None,
+            trainiters=1e5,
     ):
         self.device = device
+        self.trainiters = trainiters
         self.model = model
         self.diffusion = diffusion
         self.data = data
@@ -114,6 +117,11 @@ class TrainLoop:
             self.use_ddp = False
             self.ddp_model = self.model
 
+        self.post_init()       # this is for subclasses
+
+    def post_init(self):
+        pass
+
     def _load_and_sync_parameters(self, device=None):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
 
@@ -165,7 +173,7 @@ class TrainLoop:
         while (
             not self.lr_anneal_steps
             or self.step + self.resume_step < self.lr_anneal_steps
-        ):
+        ) and self.step < self.trainiters:
             batch, cond = next(self.data)
             self.run_step(batch, cond)
             if self.step % self.log_interval == 0:
@@ -198,6 +206,7 @@ class TrainLoop:
             }
             last_batch = (i + self.microbatch) >= batch.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], self.device)
+            assert torch.all(weights == weights.mean())     # temporarily assume all weights are same (otherwise rounding in distillation doesn't match up)
 
             compute_losses = functools.partial(
                 self.diffusion.training_losses,
@@ -314,6 +323,62 @@ class TrainLoop:
         else:
             return params
 
+
+class DistillTrainLoop(TrainLoop):
+    def post_init(self):
+        num_distill_phases = len(self.diffusion.jumpsched) - 1
+        totalnumiters = self.trainiters
+        subiters = totalnumiters / (num_distill_phases + 2)     # we spend twice as much time in final two phases (which should be 2 and 1 step)
+        self.iters_per_phase = [subiters for _ in range(num_distill_phases)]
+        self.iters_per_phase[-2] += subiters
+        self.iters_per_phase[-1] += subiters
+
+    def run_loop(self):
+        # while (not self.lr_anneal_steps
+        #     or self.step + self.resume_step < self.lr_anneal_steps):
+        for phaseiters in range(len(self.iters_per_phase)):
+            for i in range(phaseiters):
+                self.diffusion.increase_jump_size(self.model)
+                batch, cond = next(self.data)
+                self.run_step(batch, cond)
+                if self.step % self.log_interval == 0:
+                    logger.dumpkvs()
+                if self.step % self.save_interval == 0:
+                    self.save()
+                    # Run for a finite amount of time in integration tests.
+                    if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
+                        return
+
+                self.step += 1
+            # Save the last checkpoint if it wasn't already saved.
+            # if (self.step - 1) % self.save_interval != 0:
+            self.save()
+
+    def save(self):
+        def save_checkpoint(rate, params):
+            state_dict = self._master_params_to_state_dict(params)
+            jumpsize = self.diffusion.jumpsched[self.diffusion.distillphase[0]]
+            if dist.get_rank() == 0:
+                logger.log(f"saving model {rate}...")
+                if not rate:
+                    filename = f"model{(self.step+self.resume_step):06d}-jump{jumpsize}.pt"
+                else:
+                    filename = f"ema_{rate}_{(self.step+self.resume_step):06d}-jump{jumpsize}.pt"
+                with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
+                    th.save(state_dict, f)
+
+        save_checkpoint(0, self.master_params)
+        for rate, params in zip(self.ema_rate, self.ema_params):
+            save_checkpoint(rate, params)
+
+        if dist.get_rank() == 0:
+            with bf.BlobFile(
+                bf.join(get_blob_logdir(), f"opt{(self.step+self.resume_step):06d}.pt"),
+                "wb",
+            ) as f:
+                th.save(self.opt.state_dict(), f)
+
+        dist.barrier()
 
 def parse_resume_step_from_filename(filename):
     """

@@ -2,6 +2,7 @@ import argparse
 import inspect
 
 from . import gaussian_diffusion
+from .distilled_gaussian_diffusion import DistilledGaussianDiffusion
 from .respace import SpacedDiffusion, space_timesteps
 from .unet import SuperResModel, UNetModel
 
@@ -32,6 +33,34 @@ def model_and_diffusion_defaults():
         rescale_learned_sigmas=True,
         use_checkpoint=False,
         use_scale_shift_norm=True,
+    )
+
+
+def model_and_distilled_diffusion_defaults():
+    """
+    Defaults for image training.
+    """
+    return dict(
+        image_size=64,
+        num_channels=128,
+        num_res_blocks=2,
+        num_heads=4,
+        num_heads_upsample=-1,
+        attention_resolutions="16,8",
+        dropout=0.0,
+        learn_sigma=False,
+        sigma_small=False,
+        class_cond=False,
+        diffusion_steps=1000,
+        noise_schedule="linear",
+        timestep_respacing="",
+        use_kl=False,
+        predict_xstart=False,
+        rescale_timesteps=True,
+        rescale_learned_sigmas=True,
+        use_checkpoint=False,
+        use_scale_shift_norm=True,
+        jumpsched=2,
     )
 
 
@@ -79,6 +108,56 @@ def create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+    )
+    return model, diffusion
+
+
+def create_model_and_distilled_diffusion(
+    image_size,
+    class_cond,
+    learn_sigma,
+    sigma_small,
+    num_channels,
+    num_res_blocks,
+    num_heads,
+    num_heads_upsample,
+    attention_resolutions,
+    dropout,
+    diffusion_steps,
+    noise_schedule,
+    timestep_respacing,
+    use_kl,
+    predict_xstart,
+    rescale_timesteps,
+    rescale_learned_sigmas,
+    use_checkpoint,
+    use_scale_shift_norm,
+        jumpsched
+):
+    model = create_model(
+        image_size,
+        num_channels,
+        num_res_blocks,
+        learn_sigma=learn_sigma,
+        class_cond=class_cond,
+        use_checkpoint=use_checkpoint,
+        attention_resolutions=attention_resolutions,
+        num_heads=num_heads,
+        num_heads_upsample=num_heads_upsample,
+        use_scale_shift_norm=use_scale_shift_norm,
+        dropout=dropout,
+    )
+    diffusion = create_distilled_gaussian_diffusion(
+        steps=diffusion_steps,
+        learn_sigma=learn_sigma,
+        sigma_small=sigma_small,
+        noise_schedule=noise_schedule,
+        use_kl=use_kl,
+        predict_xstart=predict_xstart,
+        rescale_timesteps=rescale_timesteps,
+        rescale_learned_sigmas=rescale_learned_sigmas,
+        timestep_respacing=timestep_respacing,
+        jumpsched=jumpsched,
     )
     return model, diffusion
 
@@ -250,6 +329,48 @@ def create_gaussian_diffusion(
         timestep_respacing = [steps]
     return SpacedDiffusion(
         use_timesteps=space_timesteps(steps, timestep_respacing),
+        betas=betas,
+        model_mean_type=(
+            gaussian_diffusion.ModelMeanType.EPSILON if not predict_xstart else gaussian_diffusion.ModelMeanType.START_X
+        ),
+        model_var_type=(
+            (
+                gaussian_diffusion.ModelVarType.FIXED_LARGE
+                if not sigma_small
+                else gaussian_diffusion.ModelVarType.FIXED_SMALL
+            )
+            if not learn_sigma
+            else gaussian_diffusion.ModelVarType.LEARNED_RANGE
+        ),
+        loss_type=loss_type,
+        rescale_timesteps=rescale_timesteps,
+    )
+
+
+
+def create_distilled_gaussian_diffusion(
+    *,
+    steps=1000,
+    learn_sigma=False,
+    sigma_small=False,
+    noise_schedule="linear",
+    use_kl=False,
+    predict_xstart=False,
+    rescale_timesteps=False,
+    rescale_learned_sigmas=False,
+    timestep_respacing="",
+    jumpsched=2,
+):
+    betas = gaussian_diffusion.get_named_beta_schedule(noise_schedule, steps)
+    if use_kl:
+        loss_type = gaussian_diffusion.LossType.RESCALED_KL
+    elif rescale_learned_sigmas:
+        loss_type = gaussian_diffusion.LossType.RESCALED_MSE
+    else:
+        loss_type = gaussian_diffusion.LossType.MSE
+    if not timestep_respacing:
+        timestep_respacing = [steps]
+    return DistilledGaussianDiffusion(
         betas=betas,
         model_mean_type=(
             gaussian_diffusion.ModelMeanType.EPSILON if not predict_xstart else gaussian_diffusion.ModelMeanType.START_X
