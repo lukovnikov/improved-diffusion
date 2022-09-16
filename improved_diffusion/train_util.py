@@ -48,7 +48,8 @@ class TrainLoop:
         weight_decay=0.0,
         lr_anneal_steps=0,
             device=None,
-            trainiters=1e5,
+            trainiters=int(1e5),
+            savedir=None,
     ):
         self.device = device
         self.trainiters = trainiters
@@ -80,6 +81,8 @@ class TrainLoop:
         self.master_params = self.model_params
         self.lg_loss_scale = INITIAL_LOG_LOSS_SCALE
         self.sync_cuda = th.cuda.is_available()
+
+        self.savedir = savedir
 
         self._load_and_sync_parameters(device=device)
         if self.use_fp16:
@@ -326,19 +329,20 @@ class TrainLoop:
 
 class DistillTrainLoop(TrainLoop):
     def post_init(self):
-        num_distill_phases = len(self.diffusion.jumpsched) - 1
+        num_distill_phases = len(self.model.jumpsched) - 1
         totalnumiters = self.trainiters
         subiters = totalnumiters / (num_distill_phases + 2)     # we spend twice as much time in final two phases (which should be 2 and 1 step)
         self.iters_per_phase = [subiters for _ in range(num_distill_phases)]
         self.iters_per_phase[-2] += subiters
         self.iters_per_phase[-1] += subiters
+        print(f"Schedule: {self.iters_per_phase} for {list(self.model.jumpsched.cpu().numpy())}")
 
     def run_loop(self):
         # while (not self.lr_anneal_steps
         #     or self.step + self.resume_step < self.lr_anneal_steps):
-        for phaseiters in range(len(self.iters_per_phase)):
-            for i in range(phaseiters):
-                self.diffusion.increase_jump_size(self.model)
+        for phaseiters in self.iters_per_phase:
+            self.diffusion.increase_jump_size(self.model)
+            for i in range(int(phaseiters)):
                 batch, cond = next(self.data)
                 self.run_step(batch, cond)
                 if self.step % self.log_interval == 0:
@@ -357,14 +361,19 @@ class DistillTrainLoop(TrainLoop):
     def save(self):
         def save_checkpoint(rate, params):
             state_dict = self._master_params_to_state_dict(params)
-            jumpsize = self.diffusion.jumpsched[self.diffusion.distillphase[0]]
+            jumpsize = self.diffusion.get_jump_size(self.model)
             if dist.get_rank() == 0:
                 logger.log(f"saving model {rate}...")
                 if not rate:
                     filename = f"model{(self.step+self.resume_step):06d}-jump{jumpsize}.pt"
                 else:
                     filename = f"ema_{rate}_{(self.step+self.resume_step):06d}-jump{jumpsize}.pt"
-                with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
+                if self.savedir is None or self.savedir == "":
+                    path = get_blob_logdir()
+                else:
+                    path = self.savedir
+                with bf.BlobFile(bf.join(path, filename), "wb") as f:
+                    logger.log(f"saving to: {f}")
                     th.save(state_dict, f)
 
         save_checkpoint(0, self.master_params)

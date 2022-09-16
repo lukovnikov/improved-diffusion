@@ -34,7 +34,9 @@ def create_argparser():
         use_fp16=False,
         fp16_scale_growth=1e-3,
         gpu=-2,
-        trainiters=1e6,
+        trainiters=int(1e6),
+        model_path="",
+        savedir="",
     )
     defaults.update(model_and_distilled_diffusion_defaults())
     parser = argparse.ArgumentParser()
@@ -54,6 +56,17 @@ def main():
     model, diffusion = create_model_and_distilled_diffusion(
         **args_to_dict(args, model_and_distilled_diffusion_defaults().keys())
     )
+
+    diffusion.initialize_jump_schedule(model, args.jumpsched)
+
+    if len(args.model_path) > 0:
+        logger.log(f"Loading model from {args.model_path}")
+        statedict = dist_util.load_state_dict(args.model_path, map_location="cpu")
+        if "jumpsched" not in statedict:
+            statedict["jumpsched"] = model.jumpsched
+            statedict["distillphase"] = model.distillphase
+        model.load_state_dict(statedict)
+
     model.to(device)
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
@@ -84,6 +97,7 @@ def main():
         lr_anneal_steps=args.lr_anneal_steps,
         device=device,
         trainiters=args.trainiters,
+        savedir=args.savedir,
     ).run_loop()
 
 

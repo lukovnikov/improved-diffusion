@@ -11,6 +11,7 @@ import math
 import numpy as np
 import torch as th
 
+from .gaussian_diffusion import ModelVarType, ModelMeanType, LossType
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
 
@@ -60,42 +61,6 @@ def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
         t2 = (i + 1) / num_diffusion_timesteps
         betas.append(min(1 - alpha_bar(t2) / alpha_bar(t1), max_beta))
     return np.array(betas)
-
-
-class ModelMeanType(enum.Enum):
-    """
-    Which type of output the model predicts.
-    """
-
-    PREVIOUS_X = enum.auto()  # the model predicts x_{t-1}
-    START_X = enum.auto()  # the model predicts x_0
-    EPSILON = enum.auto()  # the model predicts epsilon
-
-
-class ModelVarType(enum.Enum):
-    """
-    What is used as the model's output variance.
-
-    The LEARNED_RANGE option has been added to allow the model to predict
-    values between FIXED_SMALL and FIXED_LARGE, making its job easier.
-    """
-
-    LEARNED = enum.auto()
-    FIXED_SMALL = enum.auto()
-    FIXED_LARGE = enum.auto()
-    LEARNED_RANGE = enum.auto()
-
-
-class LossType(enum.Enum):
-    MSE = enum.auto()  # use raw MSE loss (and KL when learning variances)
-    RESCALED_MSE = (
-        enum.auto()
-    )  # use raw MSE loss (with RESCALED_KL when learning variances)
-    KL = enum.auto()  # use the variational lower-bound
-    RESCALED_KL = enum.auto()  # like KL, but rescale to estimate the full VLB
-
-    def is_vb(self):
-        return self == LossType.KL or self == LossType.RESCALED_KL
 
 
 class GaussianDiffusion:
@@ -494,8 +459,9 @@ class GaussianDiffusion:
 
         Same usage as p_sample().
         """
-        jump_start_t = t+self.ddim_jump_size-1 if self.ddim_jump_size is not None else t
-        jump_end_t = t
+        # jump_start_t = t+self.ddim_jump_size-1 if self.ddim_jump_size is not None else t
+        # jump_end_t = t
+        jump_start_t, jump_end_t = t
         out = self.p_mean_variance(
             model,
             x,
@@ -508,7 +474,7 @@ class GaussianDiffusion:
         # in case we used x_start or x_prev prediction.
         eps = self._predict_eps_from_xstart(x, jump_start_t, out["pred_xstart"])
         alpha_bar = _extract_into_tensor(self.alphas_cumprod, jump_start_t, x.shape)
-        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, jump_end_t, x.shape)
+        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, jump_end_t+1, x.shape)
         sigma = (
             eta
             * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
@@ -521,7 +487,7 @@ class GaussianDiffusion:
             + th.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
         )
         nonzero_mask = (
-            (jump_end_t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+            (jump_end_t != -1).float().view(-1, *([1] * (len(x.shape) - 1)))
         )  # no noise when t == 0
         sample = mean_pred + nonzero_mask * sigma * noise
         return {"sample": sample, "pred_xstart": out["pred_xstart"]}
@@ -624,6 +590,10 @@ class GaussianDiffusion:
         indices = list(range(self.num_jumps))[::-1] if self.num_jumps is not None else list(range(self.num_timesteps))[::-1]
         indices = [i * self.ddim_jump_size for i in indices] if self.ddim_jump_size is not None else indices
 
+        indices = indices + [-1]  # this is OpenAI version
+        # indices = [self.num_timesteps] + indices
+        indices = list(zip(indices[:-1], indices[1:]))
+
         if progress:
             # Lazy import so that we don't depend on tqdm.
             from tqdm.auto import tqdm
@@ -631,12 +601,13 @@ class GaussianDiffusion:
             indices = tqdm(indices)
 
         for i in indices:
-            t = th.tensor([i] * shape[0], device=device)
+            jump_start_t = th.tensor([i[0]] * shape[0], device=device)
+            jump_end_t = th.tensor([i[1]] * shape[0], device=device)
             with th.no_grad():
                 out = self.ddim_sample(
                     model,
                     img,
-                    t,
+                    (jump_start_t, jump_end_t),
                     clip_denoised=clip_denoised,
                     denoised_fn=denoised_fn,
                     model_kwargs=model_kwargs,

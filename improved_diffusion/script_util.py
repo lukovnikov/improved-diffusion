@@ -3,6 +3,7 @@ import inspect
 
 from . import gaussian_diffusion
 from .distilled_gaussian_diffusion import DistilledGaussianDiffusion
+from .gaussian_diffusion_ddim import GaussianDiffusion
 from .respace import SpacedDiffusion, space_timesteps
 from .unet import SuperResModel, UNetModel
 
@@ -60,7 +61,7 @@ def model_and_distilled_diffusion_defaults():
         rescale_learned_sigmas=True,
         use_checkpoint=False,
         use_scale_shift_norm=True,
-        jumpsched=2,
+        jumpsched="2",
     )
 
 
@@ -327,24 +328,45 @@ def create_gaussian_diffusion(
         loss_type = gaussian_diffusion.LossType.MSE
     if not timestep_respacing:
         timestep_respacing = [steps]
-    return SpacedDiffusion(
-        use_timesteps=space_timesteps(steps, timestep_respacing),
-        betas=betas,
-        model_mean_type=(
-            gaussian_diffusion.ModelMeanType.EPSILON if not predict_xstart else gaussian_diffusion.ModelMeanType.START_X
-        ),
-        model_var_type=(
-            (
-                gaussian_diffusion.ModelVarType.FIXED_LARGE
-                if not sigma_small
-                else gaussian_diffusion.ModelVarType.FIXED_SMALL
-            )
-            if not learn_sigma
-            else gaussian_diffusion.ModelVarType.LEARNED_RANGE
-        ),
-        loss_type=loss_type,
-        rescale_timesteps=rescale_timesteps,
-    )
+    if isinstance(timestep_respacing, str) and timestep_respacing.startswith("ddim"):
+        ret = GaussianDiffusion(
+            betas=betas,
+            model_mean_type=(
+                gaussian_diffusion.ModelMeanType.EPSILON if not predict_xstart else gaussian_diffusion.ModelMeanType.START_X
+            ),
+            model_var_type=(
+                (
+                    gaussian_diffusion.ModelVarType.FIXED_LARGE
+                    if not sigma_small
+                    else gaussian_diffusion.ModelVarType.FIXED_SMALL
+                )
+                if not learn_sigma
+                else gaussian_diffusion.ModelVarType.LEARNED_RANGE
+            ),
+            loss_type=loss_type,
+            rescale_timesteps=rescale_timesteps,
+            num_ddim_steps=int(timestep_respacing[4:]),
+        )
+    else:
+        ret = SpacedDiffusion(
+            use_timesteps=space_timesteps(steps, timestep_respacing),
+            betas=betas,
+            model_mean_type=(
+                gaussian_diffusion.ModelMeanType.EPSILON if not predict_xstart else gaussian_diffusion.ModelMeanType.START_X
+            ),
+            model_var_type=(
+                (
+                    gaussian_diffusion.ModelVarType.FIXED_LARGE
+                    if not sigma_small
+                    else gaussian_diffusion.ModelVarType.FIXED_SMALL
+                )
+                if not learn_sigma
+                else gaussian_diffusion.ModelVarType.LEARNED_RANGE
+            ),
+            loss_type=loss_type,
+            rescale_timesteps=rescale_timesteps,
+        )
+    return ret
 
 
 

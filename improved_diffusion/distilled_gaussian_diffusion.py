@@ -7,6 +7,7 @@ Docstrings have been added, as well as DDIM sampling and a new collection of bet
 import copy
 import enum
 import math
+from typing import Dict
 
 import numpy as np
 import torch
@@ -42,7 +43,6 @@ class DistilledGaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
-        jumpsched=2,        # if integer, specifies jump size divisor for all phases, if list specifies jump sizes
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
@@ -56,10 +56,6 @@ class DistilledGaussianDiffusion:
         assert (betas > 0).all() and (betas <= 1).all()
 
         self.num_timesteps = int(betas.shape[0])
-
-        self.jumpsched = jumpsched if not isinstance(jumpsched, int) \
-            else [jumpsched**k for k in range(0, int(math.ceil(math.log(self.num_timesteps)/math.log(jumpsched)))+1)]
-        self.distillphase = [0]
         self.teacher = None
 
         alphas = 1.0 - betas
@@ -93,19 +89,30 @@ class DistilledGaussianDiffusion:
             / (1.0 - self.alphas_cumprod)
         )
 
-    def get_jump_size(self):
-        phase = self.distillphase[0]
-        ret = self.jumpsched[phase]
+    def initialize_jump_schedule(self, model, jumpsched=2):# if integer, specifies jump size divisor for all phases, if list specifies jump sizes
+        if isinstance(jumpsched, str):
+            jumpsched = [int(i) for i in jumpsched.split(",")]
+            if len(jumpsched) == 1:
+                jumpsched = jumpsched[0]
+        jumpsched = jumpsched if not isinstance(jumpsched, int) \
+            else [jumpsched**k for k in range(0, int(math.ceil(math.log(self.num_timesteps)/math.log(jumpsched)))+1)]
+        distillphase = [0]
+        model.register_buffer("jumpsched", torch.tensor(jumpsched))
+        model.register_buffer("distillphase", torch.tensor(distillphase))
+
+    def get_jump_size(self, model):
+        phase = model.distillphase[0].cpu().item()
+        ret = model.jumpsched[phase].cpu().item()
         return ret
 
-    def get_prev_jump_size(self):
-        phase = self.distillphase[0]
-        ret = self.jumpsched[phase - 1] if phase >= 0 else None
+    def get_prev_jump_size(self, model):
+        phase = model.distillphase[0].cpu().item()
+        ret = model.jumpsched[phase - 1].cpu().item() if phase >= 0 else None
         return ret
 
     def increase_jump_size(self, model):
         self.teacher = copy.deepcopy(model)
-        self.distillphase[0] += 1
+        model.distillphase[0] += 1
 
     def q_mean_variance(self, x_start, t):
         """
@@ -424,31 +431,26 @@ class DistilledGaussianDiffusion:
         denoised_fn=None,
         model_kwargs=None,
         eta=0.0,
-        jumpsize=1,
     ):
         """
         Sample x_{t-1} from the model using DDIM.
 
         Same usage as p_sample().
         """
+        jump_start_t, jump_end_t = t
         out = self.p_mean_variance(
             model,
             x,
-            t,
+            jump_start_t,
             clip_denoised=clip_denoised,
             denoised_fn=denoised_fn,
             model_kwargs=model_kwargs,
         )
         # Usually our model outputs epsilon, but we re-derive it
         # in case we used x_start or x_prev prediction.
-        eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
-
-        newt = t - jumpsize + 1     # if t == 999, oldt remains 999,
-                                    # if t == 999 and jump size is 100, newt becomes 900
-                                    # if t == 99 and jump size is 100, newt becomes 0
-
-        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
-        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, newt, x.shape)
+        eps = self._predict_eps_from_xstart(x, jump_start_t, out["pred_xstart"])
+        alpha_bar = _extract_into_tensor(self.alphas_cumprod, jump_start_t, x.shape)
+        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, jump_end_t+1, x.shape)
         sigma = (
             eta
             * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
@@ -461,7 +463,7 @@ class DistilledGaussianDiffusion:
             + th.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
         )
         nonzero_mask = (
-            (newt != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+            (jump_end_t != -1).float().view(-1, *([1] * (len(x.shape) - 1)))
         )  # no noise when t == 0
         sample = mean_pred + nonzero_mask * sigma * noise
         return {"sample": sample, "pred_xstart": out["pred_xstart"]}
@@ -561,7 +563,11 @@ class DistilledGaussianDiffusion:
             img = noise
         else:
             img = th.randn(*shape, device=device)
-        indices = list(range(self.num_timesteps))[::-1]
+        indices = list(range(self.num_jumps))[::-1] if self.num_jumps is not None else list(range(self.num_timesteps))[::-1]
+        indices = [i * self.ddim_jump_size for i in indices] if self.ddim_jump_size is not None else indices
+
+        indices = indices + [-1]  # this is OpenAI version
+        indices = list(zip(indices[:-1], indices[1:]))
 
         if progress:
             # Lazy import so that we don't depend on tqdm.
@@ -570,12 +576,99 @@ class DistilledGaussianDiffusion:
             indices = tqdm(indices)
 
         for i in indices:
-            t = th.tensor([i] * shape[0], device=device)
+            jump_start_t = th.tensor([i[0]] * shape[0], device=device)
+            jump_end_t = th.tensor([i[1]] * shape[0], device=device)
             with th.no_grad():
                 out = self.ddim_sample(
                     model,
                     img,
-                    t,
+                    (jump_start_t, jump_end_t),
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    model_kwargs=model_kwargs,
+                    eta=eta,
+                )
+                yield out
+                img = out["sample"]
+
+
+    def distilled_ddim_sample_loop(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        eta=0.0,
+    ):
+        """
+        Use DDIM to sample from the model and yield intermediate samples from
+        each timestep of DDIM.
+
+        Same usage as p_sample_loop_progressive().
+        """
+        final = None
+        for sample in self.distilled_ddim_sample_loop_generator(
+                model,
+                shape,
+                noise=noise,
+                clip_denoised=clip_denoised,
+                denoised_fn=denoised_fn,
+                model_kwargs=model_kwargs,
+                device=device,
+                progress=progress,
+                eta=eta,
+        ):
+            final = sample
+        return final["sample"]
+
+    def distilled_ddim_sample_loop_generator(
+            self,
+            model,
+            shape,
+            noise=None,
+            clip_denoised=True,
+            denoised_fn=None,
+            model_kwargs=None,
+            device=None,
+            progress=False,
+            eta=0.0,
+    ):
+        if device is None:
+            device = next(model.parameters()).device
+        assert isinstance(shape, (tuple, list))
+        if noise is not None:
+            img = noise
+        else:
+            img = th.randn(*shape, device=device)
+
+        jump_size = self.get_jump_size(model)
+        indices = list(range(self.num_timesteps // jump_size))[::-1]
+        indices = [i * jump_size for i in indices]
+
+        indices = [self.num_timesteps] + indices
+        indices = [i - 1 for i in indices]
+        indices = list(zip(indices[:-1], indices[1:]))
+        # indices must start at T and end in -1:
+        # (T, T-K), (T-K, T-2K), ..., (K, -1) where K is jump size
+
+        if progress:
+            # Lazy import so that we don't depend on tqdm.
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices)
+
+        for i in indices:
+            jump_start_t = th.tensor([i[0]] * shape[0], device=device)
+            jump_end_t = th.tensor([i[1]] * shape[0], device=device)
+            with th.no_grad():
+                out = self.ddim_sample(
+                    model,
+                    img,
+                    (jump_start_t, jump_end_t),
                     clip_denoised=clip_denoised,
                     denoised_fn=denoised_fn,
                     model_kwargs=model_kwargs,
@@ -638,31 +731,38 @@ class DistilledGaussianDiffusion:
             noise = th.randn_like(x_start)
 
         # round off t up to the nearest valid jump start given current jump size
-        current_jump_size = self.jumpsched[self.distillphase[0]]
+        current_jump_size = self.get_jump_size(model)
         jump_start_t = t + current_jump_size - t % current_jump_size - 1   # 969 and jump 100 --> 999
-
+        # print(jump_start_t.min(), jump_start_t.max())
         x_t = self.q_sample(x_start, jump_start_t, noise=noise)
 
         # compute target eps* (and later x0) and update terms
 
         # perform a number of DDIM steps of teacher model, starting from t  and ending in t-jumpsize
-        prev_jump_size = self.get_prev_jump_size()
+        prev_jump_size = self.get_prev_jump_size(model)
+        assert current_jump_size % prev_jump_size == 0
         with torch.no_grad():
             _t = jump_start_t
             x_tmX = x_t
 
             while torch.any(_t > (jump_start_t - current_jump_size)):
-                x_tmX, x_start = self.ddim_sample(self.teacher, x_tmX, _t,
-                                                    clip_denoised=clip_denoised, jumpsize=prev_jump_size)
+                ret = self.ddim_sample(self.teacher, x_tmX, (_t, _t-prev_jump_size),
+                                                    clip_denoised=clip_denoised)
+                x_tmX, x_start = ret["sample"], ret["pred_xstart"]
                 _t = _t - prev_jump_size
 
             # compute new target
             if self.model_mean_type == ModelMeanType.EPSILON:
-                pass   # TODO
-                sqrt_recip_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recip_alphas_cumprod, jump_start_t, x_t.shape)
-                sqrt_recipm1_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, jump_start_t, x_t.shape)
-                alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, _t+1, x_t.shape)
-                eps_star = (x_tmX - )
+                # sqrt_recip_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recip_alphas_cumprod, jump_start_t, x_t.shape)
+                # sqrt_recipm1_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, jump_start_t, x_t.shape)
+                alpha_bar_t = _extract_into_tensor(self.alphas_cumprod, jump_start_t, x_t.shape)
+                alpha_bar_tmX = _extract_into_tensor(self.alphas_cumprod_prev, _t+1, x_t.shape)
+                # eps_star = (x_tmX - alpha_bar_tmX.sqrt() * sqrt_recip_alphas_cumprod_t * x_t) / \
+                #            ((1-alpha_bar_tmX).sqrt() -  alpha_bar_tmX.sqrt() * sqrt_recipm1_alphas_cumprod_t)
+                eps_star = (x_tmX - (alpha_bar_tmX / alpha_bar_t).sqrt() * x_t) / \
+                           ((1 - alpha_bar_tmX).sqrt() - (alpha_bar_tmX * (1 - alpha_bar_t) / alpha_bar_t).sqrt())
+                target = eps_star
+                # _test = (alpha_bar_tmX.sqrt() * x_start + (1 - alpha_bar_tmX).sqrt() * eps_star), x_tmX
             else:
                 raise Exception("model mean types other than epsilon not supported yet")
 
@@ -712,7 +812,7 @@ class DistilledGaussianDiffusion:
                 ModelMeanType.EPSILON: noise,
             }[self.model_mean_type]"""
 
-        model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
+        model_output = model(x_t, self._scale_timesteps(jump_start_t), **model_kwargs)
 
         # if learned variance, disregard the variance output channels when computing loss wrt mean
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE, ]:
@@ -807,3 +907,7 @@ class DistilledGaussianDiffusion:
             "xstart_mse": xstart_mse,
             "mse": mse,
         }
+
+
+if __name__ == '__main__':
+    _tst_fifocache()
