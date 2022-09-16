@@ -7,12 +7,14 @@ Docstrings have been added, as well as DDIM sampling and a new collection of bet
 import copy
 import enum
 import math
+import random
 from typing import Dict
 
 import numpy as np
 import torch
 import torch as th
 
+from improved_diffusion.fifocache import FIFOCache
 from .gaussian_diffusion import ModelVarType, ModelMeanType, LossType, _extract_into_tensor
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
@@ -89,6 +91,11 @@ class DistilledGaussianDiffusion:
             / (1.0 - self.alphas_cumprod)
         )
 
+        self.reset_cache()
+
+    def reset_cache(self):
+        self.fifocache = FIFOCache(10000, 20000)
+
     def initialize_jump_schedule(self, model, jumpsched=2):# if integer, specifies jump size divisor for all phases, if list specifies jump sizes
         if isinstance(jumpsched, str):
             jumpsched = [int(i) for i in jumpsched.split(",")]
@@ -113,6 +120,7 @@ class DistilledGaussianDiffusion:
     def increase_jump_size(self, model):
         self.teacher = copy.deepcopy(model)
         model.distillphase[0] += 1
+        self.reset_cache()
 
     def q_mean_variance(self, x_start, t):
         """
@@ -727,44 +735,58 @@ class DistilledGaussianDiffusion:
         """
         if model_kwargs is None:
             model_kwargs = {}
-        if noise is None:
-            noise = th.randn_like(x_start)
 
-        # round off t up to the nearest valid jump start given current jump size
         current_jump_size = self.get_jump_size(model)
-        jump_start_t = t + current_jump_size - t % current_jump_size - 1   # 969 and jump 100 --> 999
-        # print(jump_start_t.min(), jump_start_t.max())
-        x_t = self.q_sample(x_start, jump_start_t, noise=noise)
-
-        # compute target eps* (and later x0) and update terms
-
-        # perform a number of DDIM steps of teacher model, starting from t  and ending in t-jumpsize
         prev_jump_size = self.get_prev_jump_size(model)
-        assert current_jump_size % prev_jump_size == 0
-        with torch.no_grad():
-            _t = jump_start_t
-            x_tmX = x_t
 
-            while torch.any(_t > (jump_start_t - current_jump_size)):
-                ret = self.ddim_sample(self.teacher, x_tmX, (_t, _t-prev_jump_size),
-                                                    clip_denoised=clip_denoised)
-                x_tmX, x_start = ret["sample"], ret["pred_xstart"]
-                _t = _t - prev_jump_size
+        usedcache = False
+        if self.fifocache.is_ready() and random.random() > prev_jump_size / current_jump_size:
+            # decide randomly whether to sample a batch from cache or do a new one
+            out = self.fifocache.get_batch(len(x_start))
+            x_t, jump_start_t, target = out["x_t"], out["jump_start_t"], out["target"]
+            x_t, jump_start_t, target = [elem.to(x_start.device) for elem in [x_t, jump_start_t, target]]
+            usedcache = True
 
-            # compute new target
-            if self.model_mean_type == ModelMeanType.EPSILON:
-                # sqrt_recip_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recip_alphas_cumprod, jump_start_t, x_t.shape)
-                # sqrt_recipm1_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, jump_start_t, x_t.shape)
-                alpha_bar_t = _extract_into_tensor(self.alphas_cumprod, jump_start_t, x_t.shape)
-                alpha_bar_tmX = _extract_into_tensor(self.alphas_cumprod_prev, _t+1, x_t.shape)
-                # eps_star = (x_tmX - alpha_bar_tmX.sqrt() * sqrt_recip_alphas_cumprod_t * x_t) / \
-                #            ((1-alpha_bar_tmX).sqrt() -  alpha_bar_tmX.sqrt() * sqrt_recipm1_alphas_cumprod_t)
-                eps_star = (x_tmX - (alpha_bar_tmX / alpha_bar_t).sqrt() * x_t) / \
-                           ((1 - alpha_bar_tmX).sqrt() - (alpha_bar_tmX * (1 - alpha_bar_t) / alpha_bar_t).sqrt())
-                target = eps_star
-                # _test = (alpha_bar_tmX.sqrt() * x_start + (1 - alpha_bar_tmX).sqrt() * eps_star), x_tmX
-            else:
-                raise Exception("model mean types other than epsilon not supported yet")
+        if not usedcache:
+            if noise is None:
+                noise = th.randn_like(x_start)
+
+            # round off t up to the nearest valid jump start given current jump size
+            jump_start_t = t + current_jump_size - t % current_jump_size - 1   # 969 and jump 100 --> 999
+            # print(jump_start_t.min(), jump_start_t.max())
+            x_t = self.q_sample(x_start, jump_start_t, noise=noise)
+
+            # compute target eps* (and later x0) and update terms
+
+            # perform a number of DDIM steps of teacher model, starting from t  and ending in t-jumpsize
+            assert current_jump_size % prev_jump_size == 0
+            with torch.no_grad():
+                _t = jump_start_t
+                x_tmX = x_t
+
+                while torch.any(_t > (jump_start_t - current_jump_size)):
+                    ret = self.ddim_sample(self.teacher, x_tmX, (_t, _t-prev_jump_size),
+                                                        clip_denoised=clip_denoised)
+                    x_tmX, x_start = ret["sample"], ret["pred_xstart"]
+                    _t = _t - prev_jump_size
+
+                # compute new target
+                if self.model_mean_type == ModelMeanType.EPSILON:
+                    # sqrt_recip_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recip_alphas_cumprod, jump_start_t, x_t.shape)
+                    # sqrt_recipm1_alphas_cumprod_t = _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, jump_start_t, x_t.shape)
+                    alpha_bar_t = _extract_into_tensor(self.alphas_cumprod, jump_start_t, x_t.shape)
+                    alpha_bar_tmX = _extract_into_tensor(self.alphas_cumprod_prev, _t+1, x_t.shape)
+                    # eps_star = (x_tmX - alpha_bar_tmX.sqrt() * sqrt_recip_alphas_cumprod_t * x_t) / \
+                    #            ((1-alpha_bar_tmX).sqrt() -  alpha_bar_tmX.sqrt() * sqrt_recipm1_alphas_cumprod_t)
+                    eps_star = (x_tmX - (alpha_bar_tmX / alpha_bar_t).sqrt() * x_t) / \
+                               ((1 - alpha_bar_tmX).sqrt() - (alpha_bar_tmX * (1 - alpha_bar_t) / alpha_bar_t).sqrt())
+                    target = eps_star
+                    # _test = (alpha_bar_tmX.sqrt() * x_start + (1 - alpha_bar_tmX).sqrt() * eps_star), x_tmX
+                else:
+                    raise Exception("model mean types other than epsilon not supported yet")
+
+            # push batch to cache
+            self.fifocache.push({"x_t": x_t, "jump_start_t": jump_start_t, "target": target})
 
         terms = {}
         """if self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:

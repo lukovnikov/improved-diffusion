@@ -3,16 +3,17 @@ from typing import Dict
 import torch
 
 
-class FIFOCacheDataset(object):
-    def __init__(self, minsize=10000, maxsize=50000):
-        super(FIFOCacheDataset, self).__init__()
+class FIFOCache(object):
+    def __init__(self, minsize=10000, maxsize=50000, batchsize=None):
+        super(FIFOCache, self).__init__()
         self.minsize, self.maxsize = minsize, maxsize
+        self.batchsize = batchsize
         self.overwriteindex = 0
         self.actualsize = 0
         self.content = None
 
-    def cache_ready(self):      # cache is ready when it has reached the minimum number of elements
-        if self.content is None or len(self.content) < self.minsize:
+    def is_ready(self):      # cache is ready when it has reached the minimum number of elements
+        if self.content is None or self.actualsize < self.minsize:
             return False
         else:
             return True
@@ -35,19 +36,23 @@ class FIFOCacheDataset(object):
             self.overwriteindex = 0
             assert self.actualsize == self.maxsize
 
-    # dataset API
-    def __getitem__(self, item):
-        pass
-
-    def __len__(self):
-        return len(self.content)
+    # dataloader API
+    def get_batch(self, batsize=None):
+        batsize = batsize if batsize is not None else self.batchsize
+        assert self.is_ready()
+        idx = torch.randint(0, self.actualsize, (batsize,))
+        batch = {k: torch.index_select(v, 0, idx) for k, v in self.content.items()}
+        return batch
 
 
 def _tst_fifocache():
-    c = FIFOCacheDataset(10, 100)
+    c = FIFOCache(10, 100, 20)
     for i in range(20):
         x = {"a": torch.rand(60, 5), "b": torch.rand(60, 6)}
         c.push(x)
+
+    for _ in range(10):
+        print(c.get_batch())
 
 
 if __name__ == '__main__':
