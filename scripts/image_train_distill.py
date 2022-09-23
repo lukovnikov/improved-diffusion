@@ -3,6 +3,7 @@ Train a diffusion model on images.
 """
 
 import argparse
+import json
 
 import torch
 
@@ -16,6 +17,7 @@ from improved_diffusion.script_util import (
     add_dict_to_argparser, create_model_and_distilled_diffusion, model_and_distilled_diffusion_defaults,
 )
 from improved_diffusion.train_util import TrainLoop, DistillTrainLoop
+from scripts.image_train import save_args
 
 
 def create_argparser():
@@ -28,8 +30,8 @@ def create_argparser():
         batch_size=1,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values (we can retain multiple EMAs)
-        log_interval=10,
-        save_interval=10000,
+        log_interval=20,
+        save_interval=20000,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
@@ -46,6 +48,8 @@ def create_argparser():
 
 def main():
     args = create_argparser().parse_args()
+    print(json.dumps(args.__dict__, indent=4))
+    save_args(args, "config_distill.json")
 
     dist_util.setup_dist()
     logger.configure()

@@ -7,6 +7,7 @@ import argparse
 import os
 
 import numpy as np
+import torch
 import torch as th
 import torch.distributed as dist
 
@@ -35,9 +36,9 @@ def main():
 
     diffusion.initialize_jump_schedule(model, args.jumpsched)
 
-    model.load_state_dict(
-        dist_util.load_state_dict(args.model_path, map_location="cpu")
-    )
+    sd = dist_util.load_state_dict(args.model_path, map_location="cpu")
+    model.register_buffer("jumpsched", torch.zeros_like(sd["jumpsched"]))   # otherwise, shape mismatch
+    model.load_state_dict(sd)
 
     os.makedirs(args.save_path, exist_ok=True)
 
@@ -121,7 +122,7 @@ def main():
 
 def create_argparser():
     defaults = dict(
-        clip_denoised=True,
+        clip_denoised=False,
         num_samples=50000,
         batch_size=16,
         use_ddim=False,

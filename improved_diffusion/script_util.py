@@ -62,6 +62,7 @@ def model_and_distilled_diffusion_defaults():
         use_checkpoint=False,
         use_scale_shift_norm=True,
         jumpsched="2",
+        use_cache=False,
     )
 
 
@@ -133,7 +134,8 @@ def create_model_and_distilled_diffusion(
     rescale_learned_sigmas,
     use_checkpoint,
     use_scale_shift_norm,
-        jumpsched
+        jumpsched,
+        use_cache,
 ):
     model = create_model(
         image_size,
@@ -159,6 +161,7 @@ def create_model_and_distilled_diffusion(
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
         jumpsched=jumpsched,
+        use_cache=use_cache,
     )
     return model, diffusion
 
@@ -382,6 +385,7 @@ def create_distilled_gaussian_diffusion(
     rescale_learned_sigmas=False,
     timestep_respacing="",
     jumpsched=2,
+        use_cache=False,
 ):
     betas = gaussian_diffusion.get_named_beta_schedule(noise_schedule, steps)
     if use_kl:
@@ -408,6 +412,7 @@ def create_distilled_gaussian_diffusion(
         ),
         loss_type=loss_type,
         rescale_timesteps=rescale_timesteps,
+        use_cache=use_cache,
     )
 
 

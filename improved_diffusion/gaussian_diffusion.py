@@ -746,10 +746,20 @@ class GaussianDiffusion:
             }[self.model_mean_type]
             assert model_output.shape == target.shape == x_start.shape
             terms["mse"] = mean_flat((target - model_output) ** 2)
+
+            # truncated SNR weighting when learning to predict x_0
+            if self.model_mean_type == ModelMeanType.START_X:
+                alphas = _extract_into_tensor(self.alphas_cumprod, t, terms["mse"].shape)
+                weights = (alphas / (1 - alphas)).clamp_min(1.)
+                terms["mse"] = terms["mse"] * weights
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]
             else:
                 terms["loss"] = terms["mse"]
+
+            # track difference between predicted eps and real eps
+            pred_noise = self._predict_eps_from_xstart(x_t, t, model_output)
+            terms["mse_eps"] = mean_flat((pred_noise - noise) ** 2)
         else:
             raise NotImplementedError(self.loss_type)
 

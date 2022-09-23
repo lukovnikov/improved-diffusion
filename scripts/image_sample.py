@@ -43,7 +43,7 @@ def main():
     model.to(device)
     model.eval()
 
-    print(model)
+    # print(model)
 
     def count_parameters(m):
         return sum(p.numel() for p in m.parameters() if p.requires_grad)
@@ -118,7 +118,7 @@ def main():
 
 def create_argparser():
     defaults = dict(
-        clip_denoised=True,
+        clip_denoised=False,
         num_samples=50000,
         batch_size=16,
         use_ddim=False,

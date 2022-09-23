@@ -3,6 +3,8 @@ Train a diffusion model on images.
 """
 
 import argparse
+import json
+import os
 
 import torch
 
@@ -28,12 +30,14 @@ def create_argparser():
         batch_size=1,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
-        log_interval=10,
-        save_interval=10000,
+        log_interval=20,
+        save_interval=20000,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
         gpu=-2,
+        trainiters=int(1e6),
+        savedir="",
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
@@ -41,8 +45,19 @@ def create_argparser():
     return parser
 
 
+def save_args(args, filename="config.json"):
+    # save args in args.savedir
+    if args.savedir is not None and args.savedir != "":
+        os.makedirs(args.savedir, exist_ok=True)
+        with open(os.path.join(args.savedir, filename), "w") as f:
+            json.dump(args.__dict__, f, indent=4)
+        logger.log(f"config saved")
+
+
 def main():
     args = create_argparser().parse_args()
+    print(json.dumps(args.__dict__, indent=4))
+    save_args(args, "config.json")
 
     dist_util.setup_dist()
     logger.configure()
@@ -82,6 +97,8 @@ def main():
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
         device=device,
+        trainiters=args.trainiters,
+        savedir=args.savedir,
     ).run_loop()
 
 

@@ -9,6 +9,7 @@ import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LinearLR, SequentialLR, ConstantLR, LambdaLR
 
 from . import dist_util, logger
 
@@ -188,8 +189,8 @@ class TrainLoop:
                     return
             self.step += 1
         # Save the last checkpoint if it wasn't already saved.
-        if (self.step - 1) % self.save_interval != 0:
-            self.save()
+        # if (self.step - 1) % self.save_interval != 0:
+        self.save()
 
     def run_step(self, batch, cond):
         self.forward_backward(batch, cond)
@@ -267,7 +268,7 @@ class TrainLoop:
         sqsum = 0.0
         for p in self.master_params:
             sqsum += (p.grad ** 2).sum().item()
-        logger.logkv_mean("grad_norm", np.sqrt(sqsum))
+        logger.logkv_mean("z)_grad_norm", np.sqrt(sqsum))
 
     def _anneal_lr(self):
         if not self.lr_anneal_steps:
@@ -292,7 +293,12 @@ class TrainLoop:
                     filename = f"model{(self.step+self.resume_step):06d}.pt"
                 else:
                     filename = f"ema_{rate}_{(self.step+self.resume_step):06d}.pt"
-                with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
+                if self.savedir is None or self.savedir == "":
+                    path = get_blob_logdir()
+                else:
+                    path = self.savedir
+                with bf.BlobFile(bf.join(path, filename), "wb") as f:
+                    logger.log(f"saving to: {f}")
                     th.save(state_dict, f)
 
         save_checkpoint(0, self.master_params)
@@ -327,6 +333,23 @@ class TrainLoop:
             return params
 
 
+class LogLinearLR(LambdaLR):
+    def __init__(self, optimizer, start_factor=0, end_factor=-3, total_iters=5, last_epoch=-1,
+                 verbose=False, base=10):
+        self.base = base
+        self.log_start_factor = start_factor  # np.log(start_factor) / np.log(self.base)
+        self.log_end_factor = end_factor  # np.log(end_factor) / np.log(self.base)
+        self.total_iters = total_iters
+
+        super().__init__(optimizer, self.compute_lr, last_epoch=last_epoch, verbose=verbose)
+
+    def compute_lr(self, t):
+        progress = t / self.total_iters
+        log_factor = self.log_start_factor * (1 - progress) + self.log_end_factor * progress
+        factor = self.base ** log_factor
+        return factor
+
+
 class DistillTrainLoop(TrainLoop):
     def post_init(self):
         num_distill_phases = len(self.model.jumpsched) - 1
@@ -340,10 +363,21 @@ class DistillTrainLoop(TrainLoop):
     def run_loop(self):
         # while (not self.lr_anneal_steps
         #     or self.step + self.resume_step < self.lr_anneal_steps):
+        # new optimizer (momentum!) and LR annealing schedule in every distillation phase
         for phaseiters in self.iters_per_phase:
+            self.opt = AdamW(self.master_params, lr=self.lr, weight_decay=self.weight_decay)
+            # warmupsteps = int(phaseiters * 0.01)
+            # cooldownsteps = int(phaseiters - warmupsteps)
+            # schedule = SequentialLR(self.opt, [LinearLR(self.opt, start_factor=1e-3, end_factor=1, total_iters=warmupsteps),
+            #                                    LinearLR(self.opt, start_factor=1, end_factor=1e-3, total_iters=cooldownsteps)],
+            #                                    # LogLinearLR(self.opt, start_factor=0, end_factor=-3, total_iters=cooldownsteps)],
+            #                         milestones=[warmupsteps])
+            schedule = LogLinearLR(self.opt, start_factor=0, end_factor=-3, total_iters=phaseiters)
+            # logger.log(f"Using scheduled LR with {warmupsteps} warm up updates and {cooldownsteps} updates log-linearly decayed")
             self.diffusion.increase_jump_size(self.model)
             for i in range(int(phaseiters)):
                 batch, cond = next(self.data)
+                # print(schedule.get_last_lr())
                 self.run_step(batch, cond)
                 if self.step % self.log_interval == 0:
                     logger.dumpkvs()
@@ -354,6 +388,7 @@ class DistillTrainLoop(TrainLoop):
                         return
 
                 self.step += 1
+                schedule.step()
             # Save the last checkpoint if it wasn't already saved.
             # if (self.step - 1) % self.save_interval != 0:
             self.save()
@@ -427,7 +462,7 @@ def find_ema_checkpoint(main_checkpoint, step, rate):
 def log_loss_dict(diffusion, ts, losses):
     for key, values in losses.items():
         logger.logkv_mean(key, values.mean().item())
-        # Log the quantiles (four quartiles, in particular).
-        for sub_t, sub_loss in zip(ts.cpu().numpy(), values.detach().cpu().numpy()):
-            quartile = int(4 * sub_t / diffusion.num_timesteps)
-            logger.logkv_mean(f"{key}_q{quartile}", sub_loss)
+        # # Log the quantiles (four quartiles, in particular).
+        # for sub_t, sub_loss in zip(ts.cpu().numpy(), values.detach().cpu().numpy()):
+        #     quartile = int(4 * sub_t / diffusion.num_timesteps)
+        #     logger.logkv_mean(f"{key}_q{quartile}", sub_loss)

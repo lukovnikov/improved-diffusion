@@ -65,14 +65,14 @@ class HumanOutputFormat(KVWriter, SeqWriter):
 
         # Write out the data
         dashes = "-" * (keywidth + valwidth + 7)
-        lines = [dashes]
+        lines = [] #    [dashes]
         for (key, val) in sorted(key2str.items(), key=lambda kv: kv[0].lower()):
             lines.append(
                 "| %s%s | %s%s |"
                 % (key, " " * (keywidth - len(key)), val, " " * (valwidth - len(val)))
             )
-        lines.append(dashes)
-        self.file.write("\n".join(lines) + "\n")
+        # lines.append(dashes)
+        self.file.write(" ".join(lines) + "\n")
 
         # Flush the output to the file
         self.file.flush()

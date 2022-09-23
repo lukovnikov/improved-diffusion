@@ -45,6 +45,7 @@ class DistilledGaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
+            use_cache=False,
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
@@ -91,10 +92,14 @@ class DistilledGaussianDiffusion:
             / (1.0 - self.alphas_cumprod)
         )
 
+        self.use_cache = use_cache
         self.reset_cache()
 
     def reset_cache(self):
-        self.fifocache = FIFOCache(10000, 20000)
+        if self.use_cache:
+            self.fifocache = FIFOCache(100, 200)
+        else:
+            self.fifocache = None
 
     def initialize_jump_schedule(self, model, jumpsched=2):# if integer, specifies jump size divisor for all phases, if list specifies jump sizes
         if isinstance(jumpsched, str):
@@ -740,7 +745,9 @@ class DistilledGaussianDiffusion:
         prev_jump_size = self.get_prev_jump_size(model)
 
         usedcache = False
-        if self.fifocache.is_ready() and random.random() > prev_jump_size / current_jump_size:
+        if self.fifocache is not None and \
+                self.fifocache.is_ready() \
+                and random.random() > 2. * prev_jump_size / current_jump_size:
             # decide randomly whether to sample a batch from cache or do a new one
             out = self.fifocache.get_batch(len(x_start))
             x_t, jump_start_t, target = out["x_t"], out["jump_start_t"], out["target"]
@@ -786,7 +793,8 @@ class DistilledGaussianDiffusion:
                     raise Exception("model mean types other than epsilon not supported yet")
 
             # push batch to cache
-            self.fifocache.push({"x_t": x_t, "jump_start_t": jump_start_t, "target": target})
+            if self.fifocache is not None:
+                self.fifocache.push({"x_t": x_t, "jump_start_t": jump_start_t, "target": target})
 
         terms = {}
         """if self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:
@@ -929,7 +937,3 @@ class DistilledGaussianDiffusion:
             "xstart_mse": xstart_mse,
             "mse": mse,
         }
-
-
-if __name__ == '__main__':
-    _tst_fifocache()
