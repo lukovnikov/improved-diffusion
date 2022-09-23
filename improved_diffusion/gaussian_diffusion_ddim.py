@@ -590,9 +590,9 @@ class GaussianDiffusion:
         indices = list(range(self.num_jumps))[::-1] if self.num_jumps is not None else list(range(self.num_timesteps))[::-1]
         indices = [i * self.ddim_jump_size for i in indices] if self.ddim_jump_size is not None else indices
 
-        # indices = indices + [-1]  # this is OpenAI version
-        indices = [self.num_timesteps] + indices      # TODO: test this with clip_denoising = False
-        indices = [i - 1 for i in indices]
+        indices = indices + [-1]  # this is OpenAI version
+        # indices = [self.num_timesteps] + indices      # TODO: test this with clip_denoising = False
+        # indices = [i - 1 for i in indices]
         indices = list(zip(indices[:-1], indices[1:]))
 
         if progress:

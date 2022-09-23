@@ -17,7 +17,7 @@ from improved_diffusion.script_util import (
     add_dict_to_argparser, create_model_and_distilled_diffusion, model_and_distilled_diffusion_defaults,
 )
 from improved_diffusion.train_util import TrainLoop, DistillTrainLoop
-from scripts.image_train import save_args
+from image_train import save_args
 
 
 def create_argparser():
