@@ -10,6 +10,20 @@ from .unet import SuperResModel, UNetModel
 NUM_CLASSES = 1000
 
 
+modelargs = ("image_size", "num_channels", "num_res_blocks", "num_heads", "num_heads_upsample",
+             "attention_resolutions", "dropout", "use_checkpoint", "use_scale_shift_norm", "class_cond")
+diffusionargs = ("learn_sigma", "sigma_small", "diffusion_steps", "clip_denoised",
+                 "noise_schedule", "timestep_respacing", "use_kl", "predict_xstart",
+                 "rescale_timesteps", "rescale_learned_sigmas")
+trainargs = ("batch_size", "device", "savedir", "data_dir", "schedule_sampler", "lr", "weight_decay",
+             "lr_anneal_steps", "microbatch", "ema_rate", "log_interval", "save_interval", "resume_checkpoint",
+             "use_fp16", "fp16_scale_growth", "gpu", "trainiters")
+distillargs = ("batch_size", "device", "savedir", "data_dir", "model_path", "schedule_sampler", "lr", "weight_decay",
+             "lr_anneal_steps", "microbatch", "ema_rate", "log_interval", "save_interval", "resume_checkpoint",
+             "use_fp16", "fp16_scale_growth", "gpu", "trainiters", "jumpsched", "use_cache")
+sampleargs = ("batch_size", "device", "use_ddim", "model_path", "save_path", "num_samples")
+
+
 def model_and_diffusion_defaults():
     """
     Defaults for image training.

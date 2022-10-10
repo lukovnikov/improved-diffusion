@@ -48,7 +48,7 @@ def main():
     def count_parameters(m):
         return sum(p.numel() for p in m.parameters() if p.requires_grad)
 
-    print(f"# Params: {count_parameters(model)}")
+    print(f"# Params: {count_parameters(model)//1e6:.2f}M")
 
     logger.log("sampling...")
     # all_images = []
